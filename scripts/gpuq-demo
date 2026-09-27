@@ -1,0 +1,7 @@
+#!/bin/sh
+# User-owned demo installation. Production installs use deploy/gpuq.
+gpuq_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+export PYTHONPATH="$gpuq_root/src${PYTHONPATH:+:$PYTHONPATH}"
+export GPUQ_SOCKET="${GPUQ_SOCKET:-$HOME/.local/run/gpuq/gpuq.sock}"
+export GPUQ_DAEMON_UID="${GPUQ_DAEMON_UID:-$(id -u)}"
+exec "$gpuq_root/.venv/bin/python" -m gpuq.cli "$@"

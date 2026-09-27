@@ -1,0 +1,20 @@
+[Unit]
+Description=Single-host NVIDIA GPU allocation queue
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gpuqd --socket /run/gpuq/gpuq.sock --state-dir /var/lib/gpuqd
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=gpuq
+RuntimeDirectoryMode=0755
+StateDirectory=gpuqd
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

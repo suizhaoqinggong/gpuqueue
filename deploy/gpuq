@@ -1,0 +1,4 @@
+#!/bin/sh
+export PYTHONPATH="/opt/gpuq/src${PYTHONPATH:+:$PYTHONPATH}"
+export GPUQ_SOCKET="${GPUQ_SOCKET:-/run/gpuq/gpuq.sock}"
+exec /usr/bin/python3 -m gpuq.cli "$@"

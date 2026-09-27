@@ -1,0 +1,3 @@
+#!/bin/sh
+export PYTHONPATH="/opt/gpuq/src${PYTHONPATH:+:$PYTHONPATH}"
+exec /usr/bin/python3 -m gpuq.daemon "$@"
