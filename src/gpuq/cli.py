@@ -426,8 +426,17 @@ def command_show(args: argparse.Namespace) -> int:
 
 
 def command_cancel(args: argparse.Namespace) -> int:
-    job = request({"action": "cancel", "job_id": args.job_id}, args.socket)["job"]
-    print(f"job {job['id']}: cancel requested; state={job['state']}")
+    payload: Dict[str, Any] = {"action": "cancel", "job_id": args.job_id}
+    if args.force:
+        if not args.reason.strip():
+            raise ClientError("--reason is required when using --force")
+        payload["force"] = True
+        payload["reason"] = args.reason.strip()
+    job = request(payload, args.socket)["job"]
+    if args.force:
+        print(f"job {job['id']}: force-cancelled (quarantine released); state={job['state']}")
+    else:
+        print(f"job {job['id']}: cancel requested; state={job['state']}")
     return 0
 
 
@@ -496,6 +505,16 @@ def parse_args() -> argparse.Namespace:
 
     cancel_parser = subparsers.add_parser("cancel", help="cancel a job")
     cancel_parser.add_argument("job_id", type=int)
+    cancel_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="force release a quarantined lease after manual verification and cleanup (admin only)",
+    )
+    cancel_parser.add_argument(
+        "--reason",
+        default="",
+        help="reason explaining that residual processes were verified and cleaned up",
+    )
     cancel_parser.set_defaults(func=command_cancel)
 
     logs_parser = subparsers.add_parser("logs", help="show a job log")

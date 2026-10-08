@@ -9,7 +9,7 @@ from typing import Any, Tuple
 
 import pytest
 
-from gpuq.store import JobStore
+from gpuq.store import JobPermissionError, JobStore
 
 
 def create_job(store: JobStore) -> Tuple[int, str]:
@@ -173,3 +173,67 @@ def test_unregistered_job_never_acquires_a_lease(tmp_path: Path, policy: str, ne
     assert store.get_job(orphan_id, uid)["state"] == "lost"
     store.schedule([0], [], policy=policy)
     assert store.get_job(ready_id, uid)["state"] == "allocated"
+
+
+def test_admin_force_cancel_quarantined_job(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    admin_uid = os.getuid()
+    other_uid = admin_uid + 1
+    job_id, token = create_job(store)
+    store.register_supervisor(job_id, admin_uid, token, 100)
+    store.schedule([0], [])
+    store.expire_stale(-1)
+    assert store.get_job(job_id, admin_uid)["state"] == "quarantined"
+
+    # Non-admin cannot force cancel another user's job
+    with pytest.raises(JobPermissionError, match="belongs to another user"):
+        store.cancel(job_id, other_uid, admin_uid=admin_uid, force=True, reason="test")
+
+    # Non-admin cannot force cancel even their own quarantined job
+    other_job_id, other_token = store.create_job(
+        uid=other_uid, username="other", name="test", gpu_count=1,
+        command=["true"], cwd="/tmp", log_path=None,
+    )
+    store.register_supervisor(other_job_id, other_uid, other_token, 101)
+    store.schedule([1], [])
+    store.expire_stale(-1)
+    assert store.get_job(other_job_id, other_uid)["state"] == "quarantined"
+    with pytest.raises(JobPermissionError, match="only administrator"):
+        store.cancel(other_job_id, other_uid, admin_uid=admin_uid, force=True, reason="test")
+
+    # Force cancel without reason is rejected
+    with pytest.raises(ValueError, match="reason is required"):
+        store.cancel(job_id, admin_uid, admin_uid=admin_uid, force=True, reason="   ")
+
+    # Force cancel on non-quarantined job is rejected
+    pending_id, _ = create_job(store)
+    with pytest.raises(ValueError, match="only permitted for quarantined"):
+        store.cancel(pending_id, admin_uid, admin_uid=admin_uid, force=True, reason="test")
+    store.cancel(pending_id, admin_uid, admin_uid=admin_uid)
+
+    # Admin force cancel succeeds
+    cancelled = store.cancel(job_id, admin_uid, admin_uid=admin_uid, force=True, reason="cleanup verified")
+    assert cancelled["state"] == "cancelled"
+    assert "cleanup verified" in cancelled["message"]
+    assert cancelled["finished_at"] is not None
+    assert 0 not in store.active_allocations()
+
+    # Admin can force-cancel other user's quarantined job
+    cancelled_other = store.cancel(other_job_id, admin_uid, admin_uid=admin_uid, force=True, reason="cleanup other")
+    assert cancelled_other["state"] == "cancelled"
+    assert store.active_allocations() == {}
+
+    # Idempotent call returns terminal state
+    again = store.cancel(job_id, admin_uid, admin_uid=admin_uid, force=True, reason="again")
+    assert again["state"] == "cancelled"
+
+    # Late finish does not reactivate
+    finished = store.finish(job_id, admin_uid, token, 0)
+    assert finished["state"] == "cancelled"
+
+    # Next job can now allocate card 0
+    next_id, next_token = create_job(store)
+    store.register_supervisor(next_id, admin_uid, next_token, 101)
+    store.schedule([0], [])
+    assert store.get_job(next_id, admin_uid)["state"] == "allocated"
+    assert store.get_job(next_id, admin_uid)["gpu_ids"] == [0]

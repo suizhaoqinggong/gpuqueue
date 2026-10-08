@@ -31,12 +31,16 @@ class ProcessScope:
             raw = Path(f"/proc/{pid}/stat").read_text()
             fields = raw[raw.rfind(")") + 2 :].split()
             return int(fields[1]), fields[19]  # ppid, starttime (PID reuse guard)
-        except (FileNotFoundError, ProcessLookupError):
+        except (FileNotFoundError, ProcessLookupError, PermissionError):
             return None
 
     def _descendants(self) -> Dict[int, str]:
         table = {}
-        for path in Path("/proc").iterdir():
+        try:
+            entries = list(Path("/proc").iterdir())
+        except OSError:
+            entries = []
+        for path in entries:
             if path.name.isdigit():
                 value = self._stat(int(path.name))
                 if value is not None:
@@ -83,7 +87,7 @@ class ProcessScope:
                 if current is not None and current[1] == started:
                     try:
                         os.kill(pid, signum)
-                    except ProcessLookupError:
+                    except (ProcessLookupError, PermissionError):
                         pass
         else:
             try:

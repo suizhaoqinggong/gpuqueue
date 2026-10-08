@@ -117,3 +117,69 @@ def test_missing_topology_cannot_adopt_legacy_active_leases(tmp_path: Path) -> N
     store.schedule([0], [])
     with pytest.raises(RuntimeError, match="topology"):
         validate_gpu_topology(tmp_path, [GPU(0, "GPU-first", "fake", 0)], store)
+
+
+def test_stale_socket_probe_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="gq-s-", dir="/tmp") as tmp_dir:
+        socket_path = Path(tmp_dir) / "timeout.sock"
+        # Create a real Unix domain socket listener that does not accept
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(str(socket_path))
+        srv.listen(0)  # zero backlog
+        try:
+            # Mock probe.connect to simulate timeout
+            orig_connect = socket.socket.connect
+
+            def mock_connect(self: socket.socket, addr: Any) -> None:
+                if str(addr) == str(socket_path):
+                    raise socket.timeout("timed out")
+                return orig_connect(self, addr)
+
+            monkeypatch.setattr(socket.socket, "connect", mock_connect)
+            with pytest.raises(RuntimeError, match="probe timed out; socket retained"):
+                _remove_stale_socket(socket_path)
+            assert socket_path.exists()
+        finally:
+            srv.close()
+
+
+def test_offline_recovery_quarantined_job(tmp_path: Path) -> None:
+    from gpuq.daemon import _acquire_lock, recover_offline
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, mode=0o700)
+    db_path = state_dir / "jobs.sqlite3"
+    store = JobStore(db_path)
+    job_id, token = store.create_job(
+        uid=os.getuid(), username="tester", name="offline-job", gpu_count=1,
+        command=["true"], cwd=str(tmp_path), log_path=None,
+    )
+    store.register_supervisor(job_id, os.getuid(), token, 100)
+    store.schedule([0], [])
+    store.expire_stale(-1)
+    assert store.get_job(job_id, os.getuid())["state"] == "quarantined"
+
+    # If lock is currently held by running daemon, offline recovery is rejected
+    lock_handle = _acquire_lock(state_dir / "gpuqd.lock")
+    try:
+        with pytest.raises(RuntimeError, match="already using this state directory"):
+            recover_offline(state_dir, job_id, "test reason")
+    finally:
+        lock_handle.close()
+
+    # Once daemon stopped, offline recovery succeeds
+    recover_offline(state_dir, job_id, "manual verification completed")
+    assert store.get_job(job_id, os.getuid())["state"] == "cancelled"
+    assert "manual verification" in store.get_job(job_id, os.getuid())["message"]
+    assert store.active_allocations() == {}
+
+
+def test_process_scope_stat_ignores_permission_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gpuq.lifecycle import ProcessScope
+
+    def mock_read_text(self: Path, *args: Any, **kwargs: Any) -> str:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(Path, "read_text", mock_read_text)
+    assert ProcessScope._stat(12345) is None

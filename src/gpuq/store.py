@@ -246,13 +246,39 @@ class JobStore:
             assert updated is not None
             return self._decode(updated)
 
-    def cancel(self, job_id: int, uid: int, *, admin_uid: int) -> Dict[str, Any]:
+    def cancel(
+        self,
+        job_id: int,
+        uid: int,
+        *,
+        admin_uid: int,
+        force: bool = False,
+        reason: str = "",
+    ) -> Dict[str, Any]:
         now = time.time()
         with self._connect() as connection:
             row = self._authorized_row(connection, job_id, uid, admin_uid=admin_uid)
             if row["state"] in TERMINAL_STATES:
                 return self._decode(row)
-            if row["state"] == "pending":
+            if force:
+                if uid != admin_uid:
+                    raise JobPermissionError("only administrator can force cancel a job")
+                if row["state"] != "quarantined":
+                    raise ValueError(f"force cancel is only permitted for quarantined jobs, not '{row['state']}'")
+                reason_clean = reason.strip()
+                if not reason_clean:
+                    raise ValueError("reason is required for force cancel")
+                message = f"force-cancelled by admin (uid={uid}): {reason_clean}"
+                connection.execute(
+                    """
+                    UPDATE jobs
+                    SET state = 'cancelled', cancel_requested = 1,
+                        finished_at = ?, updated_at = ?, message = ?
+                    WHERE id = ?
+                    """,
+                    (now, now, message, job_id),
+                )
+            elif row["state"] == "pending":
                 connection.execute(
                     """
                     UPDATE jobs

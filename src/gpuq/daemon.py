@@ -91,7 +91,13 @@ class GPUQService:
             job = self.store.get_job(int(request["job_id"]), uid, admin_uid=self.admin_uid)
             return self.job_response(job)
         if action == "cancel":
-            job = self.store.cancel(int(request["job_id"]), uid, admin_uid=self.admin_uid)
+            job = self.store.cancel(
+                int(request["job_id"]),
+                uid,
+                admin_uid=self.admin_uid,
+                force=bool(request.get("force", False)),
+                reason=str(request.get("reason", "")),
+            )
             return self.job_response(job)
         if action == "status":
             external = externally_busy_gpu_ids(self.gpus)
@@ -198,6 +204,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", type=float, default=1.0)
     parser.add_argument("--stale-after", type=float, default=30.0)
     parser.add_argument("--policy", choices=("fifo", "fit"), default="fifo")
+    parser.add_argument(
+        "--recover-job",
+        type=int,
+        default=None,
+        help="offline maintenance: force-release a quarantined job (daemon must be stopped)",
+    )
+    parser.add_argument("--reason", default="", help="reason for offline job recovery")
     return parser.parse_args()
 
 
@@ -225,6 +238,8 @@ def _remove_stale_socket(path: Path) -> None:
         probe.connect(str(path))
     except ConnectionRefusedError:
         path.unlink()
+    except (socket.timeout, TimeoutError) as error:
+        raise RuntimeError(f"cannot confirm existing service state on {path}: probe timed out; socket retained") from error
     else:
         raise RuntimeError(f"a daemon is already listening on {path}")
     finally:
@@ -290,8 +305,32 @@ def validate_gpu_topology(state_dir: Path, gpus: List[GPU], store: JobStore) -> 
             os.unlink(temporary)
 
 
+def recover_offline(state_dir: Path, job_id: int, reason: str) -> None:
+    if not reason.strip():
+        raise ValueError("--reason is required for offline recovery")
+    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    state_info = state_dir.lstat()
+    if not stat.S_ISDIR(state_info.st_mode) or state_info.st_uid != os.getuid():
+        raise PermissionError("state directory must be a real directory owned by the daemon")
+    state_dir.chmod(0o700)
+    lock_path = state_dir / "gpuqd.lock"
+    lock_handle = _acquire_lock(lock_path)
+    try:
+        db_path = state_dir / "jobs.sqlite3"
+        if not db_path.exists():
+            raise FileNotFoundError(f"database file does not exist: {db_path}")
+        store = JobStore(db_path)
+        job = store.cancel(job_id, os.getuid(), admin_uid=os.getuid(), force=True, reason=reason)
+        print(f"offline recovery complete: job {job_id} force-cancelled; state={job['state']}", flush=True)
+    finally:
+        lock_handle.close()
+
+
 def main() -> int:
     args = parse_args()
+    if args.recover_job is not None:
+        recover_offline(args.state_dir, args.recover_job, args.reason)
+        return 0
     if args.interval <= 0 or args.stale_after <= 0:
         raise ValueError("interval and stale-after must be positive")
     args.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
