@@ -44,12 +44,20 @@ def validate_socket_directory(path: Path, uid: int) -> None:
     directory = path.parent
     info = directory.lstat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, uid) or info.st_mode & 0o022:
-        raise PermissionError(f"socket directory must be owned by daemon/root and not writable by others: {directory}")
+        raise PermissionError(
+            f"socket directory must be owned by daemon/root (UID 0 or {uid}, got {info.st_uid}) "
+            f"and not writable by others (mode {oct(info.st_mode)}): {directory}. "
+            f"Suggest using /run/gpuq or a private user directory."
+        )
     # Ancestors may include a sticky shared /tmp, but not an unprotected shared directory.
     for ancestor in directory.resolve().parents:
         info = ancestor.stat()
         if info.st_uid not in (0, uid) or (info.st_mode & 0o022 and not info.st_mode & stat.S_ISVTX):
-            raise PermissionError(f"untrusted socket directory ancestor: {ancestor}")
+            raise PermissionError(
+                f"untrusted socket directory ancestor {ancestor}: owned by UID {info.st_uid} (expected 0 or {uid}), "
+                f"mode {oct(info.st_mode)}. If using shared storage/mounts, ensure parent directories are owned by root/user "
+                f"or use /run/gpuq."
+            )
 
 
 def verify_daemon(connection: socket.socket, socket_path: Path, expected_uid: Optional[int] = None) -> None:

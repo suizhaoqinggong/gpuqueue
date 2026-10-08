@@ -69,12 +69,25 @@ prefer `gpuq run` or `gpuq submit`.
   Cancellation escalates while descendants survive; only an empty task tree
   permits release. A task stuck in uninterruptible kernel sleep keeps its lease.
 - If the supervisor is killed with SIGKILL, automatic cleanup cannot be guaranteed.
-  The lease stays quarantined. There is deliberately no timeout-based force-release
-  command. Operators must investigate and terminate residual processes; this version
-  does not yet provide automated reconciliation for a permanently dead supervisor.
+  The lease stays quarantined (`Q`). CUDA-process absence alone never releases such a lease,
+  as lingering processes may still reclaim the GPU later.
+- Once operators manually investigate and terminate all residual processes (e.g. via
+  `fuser -v /dev/nvidia*`, `nvidia-smi`, or `ps`), the administrator can manually release
+  the quarantined card via RPC:
+  ```bash
+  gpuq cancel JOB_ID --force --reason "verified no residual processes and cleaned up"
+  ```
+  This atomically transitions the job to `cancelled` and frees the GPU for scheduling.
+- Offline recovery: If a GPU topology change or crash occurs with quarantined leases,
+  preventing daemon startup, use the offline maintenance entrypoint while the daemon is stopped:
+  ```bash
+  gpuqd --state-dir /var/lib/gpuqd --recover-job JOB_ID --reason "manual offline release after verification"
+  ```
 - GPU UUID/index topology changes with active leases prevent daemon startup.
-  Drain jobs before changing hardware or migrating state; do not delete state to
-  bypass this check.
+  Drain jobs or use offline recovery before changing hardware or migrating state.
+- Socket directory path rules: All socket parent directories must be owned by UID 0 or the
+  daemon UID and not group/world writable. On shared cluster mounts (NFS, `/scratch`), ensure
+  ancestors meet this trust boundary, or place the socket in `/run/gpuq`.
 
 ## Scheduling
 

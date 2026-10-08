@@ -88,7 +88,28 @@ class GPUQService:
             jobs = self.store.list_jobs(
                 uid, include_all=bool(request.get("all", False)), admin_uid=self.admin_uid
             )
-            return {"ok": True, "jobs": [self.decorate_job(job) for job in jobs]}
+            decorated = [self.decorate_job(job) for job in jobs]
+            if uid != self.admin_uid:
+                sanitized = []
+                for job in decorated:
+                    if job["uid"] == uid:
+                        sanitized.append(job)
+                    else:
+                        sanitized.append({
+                            "id": job["id"],
+                            "uid": job["uid"],
+                            "username": job["username"],
+                            "name": "-",
+                            "state": job["state"],
+                            "gpu_count": job["gpu_count"],
+                            "gpu_ids": job.get("gpu_ids", []),
+                            "gpu_uuids": job.get("gpu_uuids", []),
+                            "created_at": job["created_at"],
+                            "started_at": job.get("started_at"),
+                            "cancel_requested": job.get("cancel_requested", False),
+                        })
+                return {"ok": True, "jobs": sanitized}
+            return {"ok": True, "jobs": decorated}
         if action == "get":
             job = self.store.get_job(int(request["job_id"]), uid, admin_uid=self.admin_uid)
             return self.job_response(job)

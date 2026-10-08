@@ -144,6 +144,44 @@ def test_stale_socket_probe_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
             srv.close()
 
 
+def test_list_jobs_desensitizes_for_non_admin(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    service = GPUQService(store, [GPU(0, "GPU-0", "fake", 0)], admin_uid=1000)
+    # Create job by user 1001
+    job1_id, token1 = store.create_job(
+        uid=1001, username="alice", name="secret-experiment", gpu_count=1,
+        command=["python", "secret_train.py", "--key", "secret123"],
+        cwd="/home/alice/secret_project", log_path="/home/alice/train.log",
+    )
+    # Create job by user 1002
+    job2_id, token2 = store.create_job(
+        uid=1002, username="bob", name="bob-job", gpu_count=1,
+        command=["python", "run.py"], cwd="/home/bob", log_path=None,
+    )
+
+    # Bob (1002) lists with all=True: sees his own full job, but Alice's job is desensitized
+    resp_bob = service.handle(1002, {"action": "list", "all": True})
+    jobs_bob = {j["id"]: j for j in resp_bob["jobs"]}
+    alice_view_by_bob = jobs_bob[job1_id]
+    bob_view_by_bob = jobs_bob[job2_id]
+
+    assert alice_view_by_bob["username"] == "alice"
+    assert alice_view_by_bob["name"] == "-"
+    assert "command" not in alice_view_by_bob
+    assert "cwd" not in alice_view_by_bob
+    assert "log_path" not in alice_view_by_bob
+
+    assert bob_view_by_bob["username"] == "bob"
+    assert bob_view_by_bob["name"] == "bob-job"
+    assert bob_view_by_bob["command"] == ["python", "run.py"]
+
+    # Admin (1000) lists with all=True: sees full details for all jobs
+    resp_admin = service.handle(1000, {"action": "list", "all": True})
+    jobs_admin = {j["id"]: j for j in resp_admin["jobs"]}
+    assert jobs_admin[job1_id]["name"] == "secret-experiment"
+    assert jobs_admin[job1_id]["command"] == ["python", "secret_train.py", "--key", "secret123"]
+
+
 def test_offline_recovery_quarantined_job(tmp_path: Path) -> None:
     from gpuq.daemon import _acquire_lock, recover_offline
 

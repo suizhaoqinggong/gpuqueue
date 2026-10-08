@@ -163,7 +163,7 @@ class JobStore:
 
     def list_jobs(self, uid: int, *, include_all: bool, admin_uid: int) -> List[Dict[str, Any]]:
         with self._connect(write=False) as connection:
-            if include_all and uid == admin_uid:
+            if include_all:
                 rows = connection.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 200").fetchall()
             else:
                 rows = connection.execute(
