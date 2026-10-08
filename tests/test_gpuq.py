@@ -7,6 +7,8 @@ import tempfile
 import time
 from pathlib import Path
 
+import pytest
+
 from gpuq.cli import request
 from gpuq.store import JobStore
 
@@ -166,3 +168,33 @@ def test_daemon_and_foreground_client(tmp_path: Path) -> None:
         daemon.wait(timeout=5)
         socket_path.unlink(missing_ok=True)
         socket_dir.cleanup()
+
+
+def test_command_logs_validation_and_tail(tmp_path: Path, monkeypatch: Any, capfd: Any) -> None:
+    import argparse
+    from gpuq.cli import ClientError, command_logs
+    import gpuq.cli as cli
+
+    # Negative lines rejected
+    with pytest.raises(ClientError, match="nonnegative"):
+        command_logs(argparse.Namespace(lines=-1, job_id=1, socket=tmp_path / "sock", follow=False))
+
+    # Log does not exist rejected
+    monkeypatch.setattr(cli, "request", lambda payload, sock: {"job": {"log_path": str(tmp_path / "absent.log")}})
+    with pytest.raises(ClientError, match="does not exist"):
+        command_logs(argparse.Namespace(lines=10, job_id=1, socket=tmp_path / "sock", follow=False))
+
+    # Real file tailing
+    log_file = tmp_path / "test.log"
+    log_file.write_text("line1\nline2\nline3\nline4\n")
+    monkeypatch.setattr(cli, "request", lambda payload, sock: {"job": {"log_path": str(log_file)}})
+
+    # 0 lines returns 0 without error
+    assert command_logs(argparse.Namespace(lines=0, job_id=1, socket=tmp_path / "sock", follow=False)) == 0
+
+    # Normal tail
+    command_logs(argparse.Namespace(lines=2, job_id=1, socket=tmp_path / "sock", follow=False))
+    out, _ = capfd.readouterr()
+    assert "line3" in out
+    assert "line4" in out
+    assert "line1" not in out

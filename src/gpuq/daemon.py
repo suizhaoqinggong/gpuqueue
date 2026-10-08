@@ -29,10 +29,12 @@ DEFAULT_STATE_DIR = Path(
 
 
 class GPUQService:
-    def __init__(self, store: JobStore, gpus: list[GPU], admin_uid: int) -> None:
+    def __init__(self, store: JobStore, gpus: list[GPU], admin_uid: int, stale_after: float = 30.0) -> None:
         self.store = store
         self.gpus = gpus
         self.admin_uid = admin_uid
+        self.stale_after = stale_after
+        self.heartbeat_interval = max(0.5, min(2.0, stale_after / 4.0))
 
     def handle(self, uid: int, request: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(request, dict):
@@ -101,11 +103,7 @@ class GPUQService:
             return self.job_response(job)
         if action == "status":
             external = externally_busy_gpu_ids(self.gpus)
-            allocations = self.store.active_allocations()
-            allocation_states = {
-                job_id: self.store.get_job(job_id, self.admin_uid, admin_uid=self.admin_uid)["state"]
-                for job_id in set(allocations.values())
-            }
+            allocations, allocation_states = self.store.active_allocations_summary()
             gpus = [
                 {
                     "index": gpu.index,
@@ -132,7 +130,9 @@ class GPUQService:
         return result
 
     def job_response(self, job: Dict[str, Any]) -> Dict[str, Any]:
-        return {"ok": True, "job": self.decorate_job(job)}
+        response = {"ok": True, "job": self.decorate_job(job)}
+        response["heartbeat_interval"] = self.heartbeat_interval
+        return response
 
 
 class RequestHandler(socketserver.StreamRequestHandler):
@@ -357,7 +357,7 @@ def main() -> int:
     store = JobStore(args.state_dir / "jobs.sqlite3")
     validate_gpu_topology(args.state_dir, gpus, store)
     store.recover_active()
-    service = GPUQService(store, gpus, os.getuid())
+    service = GPUQService(store, gpus, os.getuid(), stale_after=args.stale_after)
 
     args.socket.parent.mkdir(parents=True, exist_ok=True, mode=0o755)
     validate_socket_directory(args.socket, os.getuid())

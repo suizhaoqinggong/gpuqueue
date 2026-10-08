@@ -237,3 +237,18 @@ def test_admin_force_cancel_quarantined_job(tmp_path: Path) -> None:
     store.schedule([0], [])
     assert store.get_job(next_id, admin_uid)["state"] == "allocated"
     assert store.get_job(next_id, admin_uid)["gpu_ids"] == [0]
+
+
+def test_active_allocations_summary(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.sqlite3")
+    uid = os.getuid()
+    job1_id, token1 = create_job(store)
+    job2_id, token2 = create_job(store)
+    store.register_supervisor(job1_id, uid, token1, 100)
+    store.register_supervisor(job2_id, uid, token2, 101)
+    store.schedule([0, 1], [])
+    store.mark_started(job1_id, uid, token1, 200)
+
+    allocations, states = store.active_allocations_summary()
+    assert allocations == {0: job1_id, 1: job2_id}
+    assert states == {job1_id: "running", job2_id: "allocated"}

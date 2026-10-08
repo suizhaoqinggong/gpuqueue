@@ -105,9 +105,12 @@ def _create_job(args: argparse.Namespace, command: Sequence[str], *, log_path: O
 def _job_request(action: str, job_id: int, token: str, socket_path: Path, **extra: Any) -> Dict[str, Any]:
     payload: Dict[str, Any] = {"action": action, "job_id": job_id, "token": token}
     payload.update(extra)
-    job = request(payload, socket_path)["job"]
+    resp = request(payload, socket_path)
+    job = resp["job"]
     if not isinstance(job, dict):
         raise ClientError("gpuqd returned an invalid job")
+    if "heartbeat_interval" in resp and "_heartbeat_interval" not in job:
+        job["_heartbeat_interval"] = float(resp["heartbeat_interval"])
     return cast(Dict[str, Any], job)
 
 
@@ -159,12 +162,16 @@ def supervise(
     try:
         job = _job_request("register", job_id, token, socket_path, supervisor_pid=os.getpid())
         registered = True
+        heartbeat_interval = float(job.get("_heartbeat_interval", 2.0))
+        last_heartbeat = time.monotonic()
         while job["state"] == "pending":
-            if stopped.wait(0.5):
+            if stopped.wait(0.2):
                 request({"action": "cancel", "job_id": job_id}, socket_path)
                 _job_request("finished", job_id, token, socket_path, return_code=130)
                 return 130
-            job = _job_request("heartbeat", job_id, token, socket_path)
+            if time.monotonic() - last_heartbeat >= heartbeat_interval:
+                job = _job_request("heartbeat", job_id, token, socket_path)
+                last_heartbeat = time.monotonic()
         if job["state"] in TERMINAL_STATES:
             return int(job.get("return_code") or (0 if job["state"] == "succeeded" else 1))
         if job["state"] != "allocated" or job["cancel_requested"] or stopped.is_set():
@@ -237,27 +244,35 @@ def supervise(
             mirror_thread.start()
         cancel_sent = False
         warned = False
+        last_heartbeat = time.monotonic()
+        last_idle_check = time.monotonic()
         idle_since = time.monotonic()
         idle_limit = float(local_job.get("idle_timeout", 0))
         while not scope.empty(process):
             if interactive and idle_limit:
-                if scope.shell_has_children(process):
-                    idle_since = time.monotonic()
-                elif time.monotonic() - idle_since >= idle_limit:
-                    print(f"gpuq: shell has had no child commands for {idle_limit:g}s; closing", flush=True)
-                    stopped.set()
+                now_mono = time.monotonic()
+                if now_mono - last_idle_check >= 1.0:
+                    last_idle_check = now_mono
+                    if scope.shell_has_children(process):
+                        idle_since = now_mono
+                    elif now_mono - idle_since >= idle_limit:
+                        if not scope.shell_has_children(process):
+                            print(f"gpuq: shell has had no child commands for {idle_limit:g}s; closing", flush=True)
+                            stopped.set()
             if stopped.is_set() and not cancel_sent:
                 try:
                     request({"action": "cancel", "job_id": job_id}, socket_path)
                     cancel_sent = True
                 except ClientError:
                     pass
-            try:
-                job = _job_request("heartbeat", job_id, token, socket_path)
-            except ClientError as error:
-                if not warned:
-                    print(f"gpuq warning: {error}; lease remains reserved", file=sys.stderr, flush=True)
-                    warned = True
+            if time.monotonic() - last_heartbeat >= heartbeat_interval:
+                try:
+                    job = _job_request("heartbeat", job_id, token, socket_path)
+                    last_heartbeat = time.monotonic()
+                except ClientError as error:
+                    if not warned:
+                        print(f"gpuq warning: {error}; lease remains reserved", file=sys.stderr, flush=True)
+                        warned = True
             if (stopped.is_set() or job["cancel_requested"] or job["state"] != "running"
                     or process.poll() is not None):
                 scope.stop_step(process)
@@ -284,10 +299,12 @@ def supervise(
         if process is not None:
             while not scope.empty(process):
                 scope.stop_step(process)
-                try:
-                    _job_request("heartbeat", job_id, token, socket_path)
-                except Exception:
-                    pass
+                if time.monotonic() - last_heartbeat >= heartbeat_interval:
+                    try:
+                        _job_request("heartbeat", job_id, token, socket_path)
+                        last_heartbeat = time.monotonic()
+                    except Exception:
+                        pass
                 time.sleep(0.2)
         if registered:
             while True:
@@ -441,17 +458,21 @@ def command_cancel(args: argparse.Namespace) -> int:
 
 
 def command_logs(args: argparse.Namespace) -> int:
+    if args.lines < 0:
+        raise ClientError("lines must be nonnegative")
     job = request({"action": "get", "job_id": args.job_id}, args.socket)["job"]
     if not job.get("log_path"):
         raise ClientError(f"job {args.job_id} has no captured log")
     path = Path(job["log_path"])
-    if args.follow:
-        return subprocess.call(["tail", "-n", str(args.lines), "-f", str(path)])
     if not path.exists():
         raise ClientError(f"log does not exist yet: {path}")
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    print("\n".join(lines[-args.lines :]))
-    return 0
+    if args.lines == 0 and not args.follow:
+        return 0
+    cmd = ["tail", "-n", str(args.lines)]
+    if args.follow:
+        cmd.append("-f")
+    cmd.extend(["--", str(path)])
+    return subprocess.call(cmd)
 
 
 def command_supervise(args: argparse.Namespace) -> int:

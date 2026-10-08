@@ -30,7 +30,7 @@ class JobStore:
         database_path.chmod(0o600)
 
     @contextmanager
-    def _connect(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self, write: bool = True) -> Iterator[sqlite3.Connection]:
         """Serialize state transitions from their first read, and always close.
 
         SQLite's connection context manager commits but does not close, and a
@@ -40,15 +40,23 @@ class JobStore:
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA busy_timeout = 10000")
-            connection.execute("PRAGMA journal_mode = WAL")
-            with connection:
-                connection.execute("BEGIN IMMEDIATE")
-                yield connection
+            if write:
+                with connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    yield connection
+            else:
+                with connection:
+                    yield connection
         finally:
             connection.close()
 
     def _initialize(self) -> None:
-        with self._connect() as connection:
+        init_conn = sqlite3.connect(str(self.database_path), timeout=10)
+        try:
+            init_conn.execute("PRAGMA journal_mode = WAL")
+        finally:
+            init_conn.close()
+        with self._connect(write=True) as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS jobs (
@@ -150,11 +158,11 @@ class JobStore:
         return cast(sqlite3.Row, row)
 
     def get_job(self, job_id: int, uid: int, *, admin_uid: Optional[int] = None) -> Dict[str, Any]:
-        with self._connect() as connection:
+        with self._connect(write=False) as connection:
             return self._decode(self._authorized_row(connection, job_id, uid, admin_uid=admin_uid))
 
     def list_jobs(self, uid: int, *, include_all: bool, admin_uid: int) -> List[Dict[str, Any]]:
-        with self._connect() as connection:
+        with self._connect(write=False) as connection:
             if include_all and uid == admin_uid:
                 rows = connection.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 200").fetchall()
             else:
@@ -377,7 +385,7 @@ class JobStore:
 
     def active_allocations(self) -> Dict[int, int]:
         allocations: Dict[int, int] = {}
-        with self._connect() as connection:
+        with self._connect(write=False) as connection:
             rows = connection.execute(
                 "SELECT id, gpu_ids FROM jobs WHERE state IN ('allocated', 'running', 'quarantined')"
             ).fetchall()
@@ -386,3 +394,18 @@ class JobStore:
                 for gpu_id in json.loads(row["gpu_ids"]):
                     allocations[int(gpu_id)] = int(row["id"])
         return allocations
+
+    def active_allocations_summary(self) -> Tuple[Dict[int, int], Dict[int, str]]:
+        allocations: Dict[int, int] = {}
+        allocation_states: Dict[int, str] = {}
+        with self._connect(write=False) as connection:
+            rows = connection.execute(
+                "SELECT id, state, gpu_ids FROM jobs WHERE state IN ('allocated', 'running', 'quarantined')"
+            ).fetchall()
+        for row in rows:
+            job_id = int(row["id"])
+            allocation_states[job_id] = str(row["state"])
+            if row["gpu_ids"]:
+                for gpu_id in json.loads(row["gpu_ids"]):
+                    allocations[int(gpu_id)] = job_id
+        return allocations, allocation_states
