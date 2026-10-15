@@ -65,6 +65,12 @@ prefer `gpuq run` or `gpuq submit`.
 - A returning supervisor cleans up a quarantined task and then confirms finish.
 - On daemon downtime, an existing running job continues. Completion notification
   is retried until the daemon returns using the SAME state directory.
+- Initial supervisor registration and pending-job heartbeats retry temporary
+  connection failures. Registration retries with the same PID and token are
+  idempotent; they cannot take over another supervisor or revive an expired lease.
+  Cancellation while disconnected is applied once the daemon returns. Normal
+  heartbeat expiry still applies; an outage longer than the lease timeout may
+  lose a pending job or quarantine an allocated job.
 - Linux child-subreaper tracking retains orphaned workers, even after `setsid`.
   Cancellation escalates while descendants survive; only an empty task tree
   permits release. A task stuck in uninterruptible kernel sleep keeps its lease.

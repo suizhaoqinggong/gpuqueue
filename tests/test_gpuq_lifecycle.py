@@ -217,6 +217,23 @@ def test_daemon_restart_preserves_running_lease(queue: QueueHarness) -> None:
     assert not alive(pid)
 
 
+def test_pending_job_survives_daemon_restart(queue: QueueHarness) -> None:
+    _, first_id = queue.start_job("import time; time.sleep(60)")
+    queue.state(first_id, "running")
+    client, pending_id = queue.start_job("print('queued workload completed')")
+    pending = queue.state(pending_id, "pending")
+    queue.stop_daemon()
+    # Longer than the negotiated heartbeat interval, within the lease timeout.
+    time.sleep(0.8)
+    queue.start_daemon()
+    wait_for(lambda: queue.job(pending_id)["heartbeat_at"] > pending["heartbeat_at"])
+    assert queue.job(pending_id)["state"] == "pending"
+    queue.rpc("cancel", job_id=first_id)
+    queue.state(first_id, "cancelled")
+    queue.state(pending_id, "succeeded")
+    assert client.wait(timeout=5) == 0
+
+
 def test_inherited_stdout_does_not_interrupt_cleanup_heartbeats(queue: QueueHarness) -> None:
     marker = queue.root / "stdout-worker.pid"
     client, job_id = queue.start_job(tree_command(marker, leader_exits=True))

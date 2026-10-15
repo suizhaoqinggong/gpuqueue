@@ -178,7 +178,11 @@ class JobStore:
             if row["state"] in TERMINAL_STATES:
                 return self._decode(row)
             if row["supervisor_pid"] is not None:
-                raise ValueError(f"job {job_id} already has a supervisor")
+                if row["supervisor_pid"] != supervisor_pid:
+                    raise ValueError(f"job {job_id} already has a supervisor")
+                # Registration may have committed even when its reply was lost.
+                # Never revive an expired lease or replace an existing owner.
+                return self._decode(row)
             if row["state"] == "quarantined":
                 raise ValueError(f"job {job_id} is quarantined")
             if supervisor_pid <= 0:

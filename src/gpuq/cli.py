@@ -37,6 +37,10 @@ class ClientError(RuntimeError):
     pass
 
 
+class DaemonUnavailableError(ClientError):
+    """A transport failure which may be retried without changing job intent."""
+
+
 def request(payload: Dict[str, Any], socket_path: Path = DEFAULT_SOCKET) -> Dict[str, Any]:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
@@ -54,19 +58,39 @@ def request(payload: Dict[str, Any], socket_path: Path = DEFAULT_SOCKET) -> Dict
                 raise ClientError("gpuqd response exceeds size limit")
             if b"\n" in chunk:
                 break
+    except PermissionError as error:
+        raise ClientError(f"cannot authenticate/access gpuqd at {socket_path}: {error}") from error
     except OSError as error:
-        raise ClientError(f"cannot reach gpuqd at {socket_path}: {error}") from error
+        raise DaemonUnavailableError(f"cannot reach gpuqd at {socket_path}: {error}") from error
     finally:
         client.close()
     if not chunks:
-        raise ClientError("gpuqd returned an empty response")
-    decoded = json.loads(b"".join(chunks).decode("utf-8"))
+        raise DaemonUnavailableError("gpuqd returned an empty response")
+    raw, newline, _ = b"".join(chunks).partition(b"\n")
+    if not newline:
+        raise DaemonUnavailableError("gpuqd connection closed before the response was complete")
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ClientError("gpuqd returned an invalid response") from error
     if not isinstance(decoded, dict):
         raise ClientError("gpuqd returned an invalid response")
     response = cast(Dict[str, Any], decoded)
     if not response.get("ok"):
         raise ClientError(str(response.get("error", "gpuqd request failed")))
     return response
+
+
+def _request_with_retry(payload: Dict[str, Any], socket_path: Path) -> Dict[str, Any]:
+    warned = False
+    while True:
+        try:
+            return request(payload, socket_path)
+        except DaemonUnavailableError as error:
+            if not warned:
+                print(f"gpuq: {error}; waiting for daemon recovery", file=sys.stderr, flush=True)
+                warned = True
+            time.sleep(0.5)
 
 
 def _strip_separator(command: Sequence[str]) -> List[str]:
@@ -102,10 +126,12 @@ def _create_job(args: argparse.Namespace, command: Sequence[str], *, log_path: O
     return int(response["job_id"]), str(response["token"])
 
 
-def _job_request(action: str, job_id: int, token: str, socket_path: Path, **extra: Any) -> Dict[str, Any]:
+def _job_request(
+    action: str, job_id: int, token: str, socket_path: Path, *, retry_unavailable: bool = False, **extra: Any
+) -> Dict[str, Any]:
     payload: Dict[str, Any] = {"action": action, "job_id": job_id, "token": token}
     payload.update(extra)
-    resp = request(payload, socket_path)
+    resp = (_request_with_retry if retry_unavailable else request)(payload, socket_path)
     job = resp["job"]
     if not isinstance(job, dict):
         raise ClientError("gpuqd returned an invalid job")
@@ -160,18 +186,23 @@ def supervise(
         old_signals[signum] = signal.signal(signum, stop_handler)
 
     try:
-        job = _job_request("register", job_id, token, socket_path, supervisor_pid=os.getpid())
+        job = _job_request(
+            "register", job_id, token, socket_path, retry_unavailable=True, supervisor_pid=os.getpid()
+        )
         registered = True
         heartbeat_interval = float(job.get("_heartbeat_interval", 2.0))
         last_heartbeat = time.monotonic()
         while job["state"] == "pending":
             if stopped.wait(0.2):
-                request({"action": "cancel", "job_id": job_id}, socket_path)
-                _job_request("finished", job_id, token, socket_path, return_code=130)
-                return 130
+                break
             if time.monotonic() - last_heartbeat >= heartbeat_interval:
-                job = _job_request("heartbeat", job_id, token, socket_path)
+                job = _job_request("heartbeat", job_id, token, socket_path, retry_unavailable=True)
                 last_heartbeat = time.monotonic()
+        # A stop signal can arrive during a retry, just before allocation returns.
+        if stopped.is_set() and job["state"] not in TERMINAL_STATES:
+            _request_with_retry({"action": "cancel", "job_id": job_id}, socket_path)
+            _job_request("finished", job_id, token, socket_path, retry_unavailable=True, return_code=130)
+            return 130
         if job["state"] in TERMINAL_STATES:
             return int(job.get("return_code") or (0 if job["state"] == "succeeded" else 1))
         if job["state"] != "allocated" or job["cancel_requested"] or stopped.is_set():

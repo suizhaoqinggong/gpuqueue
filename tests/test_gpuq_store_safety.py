@@ -54,9 +54,9 @@ def test_duplicate_supervisor_and_cancelled_start_rejected(tmp_path: Path) -> No
     uid = os.getuid()
     job_id, token = create_job(store)
     store.register_supervisor(job_id, uid, token, 100)
-    for pid in (100, 101):
-        with pytest.raises(ValueError, match="already has a supervisor"):
-            store.register_supervisor(job_id, uid, token, pid)
+    assert store.register_supervisor(job_id, uid, token, 100)["supervisor_pid"] == 100
+    with pytest.raises(ValueError, match="already has a supervisor"):
+        store.register_supervisor(job_id, uid, token, 101)
     store.schedule([0], [])
     store.cancel(job_id, uid, admin_uid=uid)
     with pytest.raises(ValueError, match="cancelled"):
