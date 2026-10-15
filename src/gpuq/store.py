@@ -339,6 +339,13 @@ class JobStore:
         external = set(externally_busy)
         now = time.time()
         with self._connect() as connection:
+            # A topology reduction can leave old requests permanently impossible.
+            connection.execute(
+                "UPDATE jobs SET state = 'failed', return_code = 125, finished_at = ?, updated_at = ?, "
+                "message = 'requested GPU count exceeds current GPU capacity' "
+                "WHERE state = 'pending' AND gpu_count > ?",
+                (now, now, len(all_gpu_ids)),
+            )
             rows = connection.execute(
                 "SELECT gpu_ids FROM jobs WHERE state IN ('allocated', 'running', 'quarantined')"
             ).fetchall()

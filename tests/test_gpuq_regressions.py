@@ -200,6 +200,25 @@ def test_queue_summary_stays_small_with_large_commands_and_names(tmp_path: Path)
     assert len(details["name"]) == 10000
 
 
+@pytest.mark.parametrize("policy", ["fifo", "fit"])
+def test_topology_reduction_rejects_impossible_pending_jobs(tmp_path: Path, policy: str) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    gpus = [GPU(i, f"GPU-{i}", "fake", 0) for i in range(2)]
+    validate_gpu_topology(tmp_path, gpus, store)
+    large_id, large_token = create(store, tmp_path, 2)
+    small_id, small_token = create(store, tmp_path)
+    store.register_supervisor(large_id, os.getuid(), large_token, 100)
+    store.register_supervisor(small_id, os.getuid(), small_token, 101)
+    validate_gpu_topology(tmp_path, gpus[:1], store)
+    store.schedule([0], [], policy=policy)
+    large = store.get_job(large_id, os.getuid())
+    assert large["state"] == "failed"
+    assert large["return_code"] == 125
+    assert "capacity" in large["message"]
+    assert large["gpu_ids"] == []
+    assert store.get_job(small_id, os.getuid())["state"] == "allocated"
+
+
 @pytest.mark.parametrize("payload", [{"limit": 0}, {"limit": 201}, {"before_id": -1}])
 def test_list_rejects_invalid_page_parameters(tmp_path: Path, payload: Any) -> None:
     service = GPUQService(JobStore(tmp_path / "jobs.db"), [], os.getuid())

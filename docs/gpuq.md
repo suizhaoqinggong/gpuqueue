@@ -102,6 +102,9 @@ prefer `gpuq run` or `gpuq submit`.
   ```
 - GPU UUID/index topology changes with active leases prevent daemon startup.
   Drain jobs or use offline recovery before changing hardware or migrating state.
+  After a permitted topology reduction, pending requests exceeding the current
+  total GPU count fail with exit code 125 and an explanatory message, allowing
+  smaller requests to proceed. Temporarily busy cards do not fail larger requests.
 - Socket directory path rules: All socket parent directories must be owned by UID 0 or the
   daemon UID and not group/world writable. On shared cluster mounts (NFS, `/scratch`), ensure
   ancestors meet this trust boundary, or place the socket in `/run/gpuq`.
