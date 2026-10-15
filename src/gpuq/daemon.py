@@ -85,9 +85,13 @@ class GPUQService:
             )
             return self.job_response(job)
         if action == "list":
+            limit = int(request.get("limit", 200))
             jobs = self.store.list_jobs(
-                uid, include_all=bool(request.get("all", False)), admin_uid=self.admin_uid
+                uid, include_all=bool(request.get("all", False)), admin_uid=self.admin_uid,
+                history=bool(request.get("history", False)), limit=limit,
+                before_id=int(request["before_id"]) if request.get("before_id") is not None else None,
             )
+            next_before_id = jobs[-1]["id"] if len(jobs) == limit else None
             decorated = [self.decorate_job(job) for job in jobs]
             if uid != self.admin_uid:
                 sanitized = []
@@ -108,8 +112,8 @@ class GPUQService:
                             "started_at": job.get("started_at"),
                             "cancel_requested": job.get("cancel_requested", False),
                         })
-                return {"ok": True, "jobs": sanitized}
-            return {"ok": True, "jobs": decorated}
+                return {"ok": True, "jobs": sanitized, "next_before_id": next_before_id}
+            return {"ok": True, "jobs": decorated, "next_before_id": next_before_id}
         if action == "get":
             job = self.store.get_job(int(request["job_id"]), uid, admin_uid=self.admin_uid)
             return self.job_response(job)

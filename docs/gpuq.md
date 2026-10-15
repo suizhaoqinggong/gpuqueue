@@ -12,12 +12,23 @@ by this package.
 ```bash
 gpuq status
 gpuq ls
+gpuq ls --all
+gpuq ls --history --limit 50
+gpuq ls --history --before JOB_ID --limit 50
 gpuq run -g 1 -- python train.py --config experiment.yaml
 gpuq submit -g 2 -- torchrun --standalone --nproc_per_node=2 train.py
 gpuq logs -f JOB_ID
 gpuq cancel JOB_ID
 gpuq show JOB_ID
 ```
+
+`ls` shows all active jobs (including quarantined jobs) and up to 200 recent
+completed jobs. `--all` includes other users' queue summaries. Active jobs are
+fetched in pages so newer submissions cannot hide an older running job.
+Use `--history` to show only completed jobs, `--limit` (1..200) for the history
+page size, and the printed `--before` cursor to continue to older records.
+Summaries truncate names to 128 characters and omit commands and paths; `show`
+retains the complete details and the existing owner/administrator permission checks.
 
 `run` and `submit` release cards only after the command AND its descendants exit.
 When the command exits, remaining descendants are terminated, first with SIGTERM

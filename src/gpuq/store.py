@@ -161,15 +161,38 @@ class JobStore:
         with self._connect(write=False) as connection:
             return self._decode(self._authorized_row(connection, job_id, uid, admin_uid=admin_uid))
 
-    def list_jobs(self, uid: int, *, include_all: bool, admin_uid: int) -> List[Dict[str, Any]]:
+    def list_jobs(
+        self, uid: int, *, include_all: bool, admin_uid: int,
+        history: bool = False, limit: int = 200, before_id: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        if not 1 <= limit <= 200:
+            raise ValueError("list limit must be between 1 and 200")
+        if before_id is not None and before_id <= 0:
+            raise ValueError("before_id must be positive")
+        conditions = ["state IN ('succeeded', 'failed', 'cancelled', 'lost')" if history
+                      else "state IN ('pending', 'allocated', 'running', 'quarantined')"]
+        values: List[Any] = []
+        if not include_all:
+            conditions.append("uid = ?")
+            values.append(uid)
+        if before_id is not None:
+            conditions.append("id < ?")
+            values.append(before_id)
+        values.append(limit)
         with self._connect(write=False) as connection:
-            if include_all:
-                rows = connection.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 200").fetchall()
-            else:
-                rows = connection.execute(
-                    "SELECT * FROM jobs WHERE uid = ? ORDER BY id DESC LIMIT 200", (uid,)
-                ).fetchall()
-        return [self._decode(row) for row in rows]
+            # Never load large commands/paths just to render a queue summary.
+            rows = connection.execute(
+                "SELECT id, uid, substr(username, 1, 64) AS username, substr(name, 1, 128) AS name, "
+                "state, gpu_count, gpu_ids, created_at, started_at, cancel_requested, supervisor_pid "
+                "FROM jobs WHERE " + " AND ".join(conditions) + " ORDER BY id DESC LIMIT ?", values,
+            ).fetchall()
+        jobs = []
+        for row in rows:
+            job = dict(row)
+            job["gpu_ids"] = json.loads(job["gpu_ids"]) if job["gpu_ids"] else []
+            job["cancel_requested"] = bool(job["cancel_requested"])
+            jobs.append(job)
+        return jobs
 
     def register_supervisor(self, job_id: int, uid: int, token: str, supervisor_pid: int) -> Dict[str, Any]:
         now = time.time()

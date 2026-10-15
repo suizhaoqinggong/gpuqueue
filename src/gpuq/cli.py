@@ -441,7 +441,24 @@ def _format_age(timestamp: Optional[float]) -> str:
 
 
 def command_list(args: argparse.Namespace) -> int:
-    jobs = request({"action": "list", "all": args.all}, args.socket)["jobs"]
+    if not 1 <= args.limit <= 200:
+        raise ClientError("list limit must be between 1 and 200")
+    if args.before is not None and args.before <= 0:
+        raise ClientError("before must be positive")
+    jobs = []
+    if not args.history:
+        before = None
+        while True:
+            response = request({"action": "list", "all": args.all, "before_id": before}, args.socket)
+            jobs.extend(response["jobs"])
+            before = response.get("next_before_id")
+            if before is None:
+                break
+    response = request({
+        "action": "list", "all": args.all, "history": True,
+        "limit": args.limit, "before_id": args.before,
+    }, args.socket)
+    jobs.extend(response["jobs"])
     print(f"{'JOB':>6} {'ST':>2} {'USER':<12} {'GPU':<8} {'AGE':>5} NAME")
     for job in jobs:
         gpu_text = ",".join(str(value) for value in job["gpu_ids"]) or f"{job['gpu_count']} req"
@@ -449,6 +466,9 @@ def command_list(args: argparse.Namespace) -> int:
             f"{job['id']:>6} {STATE_LABELS.get(job['state'], '?'):>2} "
             f"{job['username']:<12.12} {gpu_text:<8.8} {_format_age(job['created_at']):>5} {job['name']}"
         )
+    if response.get("next_before_id") is not None:
+        print(f"more history: gpuq ls --history --before {response['next_before_id']}"
+              + (" --all" if args.all else ""))
     return 0
 
 
@@ -546,6 +566,9 @@ def parse_args() -> argparse.Namespace:
 
     list_parser = subparsers.add_parser("ls", aliases=["list"], help="list jobs")
     list_parser.add_argument("--all", action="store_true")
+    list_parser.add_argument("--history", action="store_true", help="show completed jobs only")
+    list_parser.add_argument("--limit", type=int, default=200, help="history page size (1..200)")
+    list_parser.add_argument("--before", type=int, default=None, help="history before this job ID")
     list_parser.set_defaults(func=command_list)
 
     status_parser = subparsers.add_parser("status", help="show physical GPU allocation")

@@ -148,3 +148,60 @@ def test_incomplete_rpc_response_is_retryable(monkeypatch: pytest.MonkeyPatch, r
                     cli.request({"action": "ping"}, path)
             finally:
                 thread.join(timeout=3)
+
+
+def test_list_keeps_old_active_jobs_and_paginates_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any,
+) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    service = GPUQService(store, [GPU(0, "GPU-test", "fake", 0)], os.getuid())
+    old_id, token = create(store, tmp_path)
+    store.register_supervisor(old_id, os.getuid(), token, 100)
+    store.schedule([0], [])
+    store.mark_started(old_id, os.getuid(), token, 101)
+    finished_ids = []
+    for _ in range(205):
+        job_id, token = create(store, tmp_path)
+        store.finish(job_id, os.getuid(), token, 0)
+        finished_ids.append(job_id)
+    # More than one active page also must be rendered, including the old job.
+    for _ in range(205):
+        create(store, tmp_path)
+    monkeypatch.setattr(cli, "request", lambda payload, path: service.handle(os.getuid(), payload))
+    args = argparse.Namespace(all=False, socket=tmp_path / "q.sock", history=False, limit=10, before=None)
+    assert cli.command_list(args) == 0
+    output = capsys.readouterr().out
+    listed_ids = {int(line.split()[0]) for line in output.splitlines() if line.split()[0].isdigit()}
+    assert old_id in listed_ids
+    assert len(listed_ids) == 206 + 10
+    assert "more history:" in output
+    args.history = True
+    args.before = finished_ids[-10]
+    cli.command_list(args)
+    output = capsys.readouterr().out
+    listed_ids = {int(line.split()[0]) for line in output.splitlines() if line.split()[0].isdigit()}
+    assert listed_ids == set(finished_ids[-20:-10])
+
+
+def test_queue_summary_stays_small_with_large_commands_and_names(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    service = GPUQService(store, [GPU(0, "GPU-test", "fake", 0)], os.getuid())
+    for _ in range(50):
+        job_id, _ = store.create_job(
+            uid=os.getuid(), username="tester", name="n" * 10000, gpu_count=1,
+            command=["true", "x" * 90000], cwd=str(tmp_path), log_path=None,
+        )
+    response = service.handle(os.getuid(), {"action": "list"})
+    assert len(response["jobs"]) == 50
+    assert len(json.dumps(response).encode()) < 100000
+    assert all("command" not in job and len(job["name"]) <= 128 for job in response["jobs"])
+    details = service.handle(os.getuid(), {"action": "get", "job_id": job_id})["job"]
+    assert len(details["command"][1]) == 90000
+    assert len(details["name"]) == 10000
+
+
+@pytest.mark.parametrize("payload", [{"limit": 0}, {"limit": 201}, {"before_id": -1}])
+def test_list_rejects_invalid_page_parameters(tmp_path: Path, payload: Any) -> None:
+    service = GPUQService(JobStore(tmp_path / "jobs.db"), [], os.getuid())
+    with pytest.raises(ValueError):
+        service.handle(os.getuid(), {"action": "list", **payload})
